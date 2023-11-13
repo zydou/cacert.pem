@@ -1,0 +1,112 @@
+---
+name: mirror
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/mirror.yml
+  schedule:
+    - cron: 45 23 * * *
+
+permissions: write-all
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.trigger-check.outputs.action }}
+      sha256sum: ${{ steps.meta.outputs.sha256sum }}
+    steps:
+      - uses: actions/checkout@main
+      - name: set meta info
+        id: meta
+        run: |
+          curl -sSLfO https://curl.se/ca/cacert.pem
+          echo "sha256sum=$(shasum -a 256 cacert.pem | cut -d' ' -f 1)" >> $GITHUB_OUTPUT
+
+      - name: check if we need to trigger a build
+        id: trigger-check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          sha256sum: ${{ steps.meta.outputs.sha256sum }}
+        run: |
+          if ! gh api /repos/${{github.repository}}/branches/release > /dev/null 2>&1; then
+          echo "branch release not found. trigger a build"
+          echo "action=trigger" >> "$GITHUB_OUTPUT"
+          else
+          last_sha=$(curl -sSLf https://raw.githubusercontent.com/${{github.repository}}/release/metadata.json | jq -r '.sha256sum')
+          if [ "$last_sha" != "$sha256sum" ]; then
+          echo "sha256sum changed. trigger a build"
+          echo "action=trigger" >> "$GITHUB_OUTPUT"
+          else
+          echo "sha256sum not changed. skip"
+          echo "action=skip" >> "$GITHUB_OUTPUT"
+          fi
+          fi
+
+  mirror:
+    needs: filter
+    if: needs.filter.outputs.action == 'trigger'
+    name: Mirror
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Download
+        run: |-
+          curl -sSLfO https://curl.se/ca/cacert.pem
+          curl -sSLfO https://curl.se/ca/cacert.pem.sha256
+
+      - name: Upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |-
+          # create release if not exist
+          gh release create "stable" --notes "cacert.pem<br>sha256sum: ${{ needs.filter.outputs.sha256sum }}" --title "cacert.pem" --repo "${{github.repository}}" || true
+          gh release edit "stable" --notes "filename: cacert.pem<br>sha256sum: ${{ needs.filter.outputs.sha256sum }}" --title "cacert.pem" --repo "${{github.repository}}" || true
+          # delete the asset if exists
+          gh release delete-asset "stable" "cacert.pem" --yes --repo "${{github.repository}}" || true
+          gh release delete-asset "stable" "cacert.pem.sha256" --yes --repo "${{github.repository}}" || true
+          gh release upload "stable" "./cacert.pem" --repo "${{github.repository}}"
+          gh release upload "stable" "./cacert.pem.sha256" --repo "${{github.repository}}"
+
+  metadata:
+    runs-on: ubuntu-latest
+    needs: [filter, mirror]
+    name: push metadata
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@main
+
+      - name: set date
+        run: |
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+
+      - name: generate metadata
+        env:
+          sha256sum: ${{ needs.filter.outputs.sha256sum }}
+        run: |-
+          mkdir public
+          cat <<EOF > public/metadata.json
+          {
+            "date": "${{ env.date }}",
+            "sha256sum": "${{ env.sha256sum }}"
+          }
+          EOF
+          cat public/metadata.json
+          curl -sSLf -o public/cacert.pem https://curl.se/ca/cacert.pem
+          curl -sSLf -o public/cacert.pem.sha256 https://curl.se/ca/cacert.pem.sha256
+
+      - name: Deploy
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: release
+          folder: ./public
+          single-commit: true
+          commit-message: ${{ github.event.head_commit.message }}
