@@ -70,10 +70,8 @@ jobs:
           gh release create "stable" --notes "cacert.pem<br>sha256sum: ${{ needs.filter.outputs.sha256sum }}" --title "cacert.pem" --repo "${{github.repository}}" || true
           gh release edit "stable" --notes "filename: cacert.pem<br>sha256sum: ${{ needs.filter.outputs.sha256sum }}" --title "cacert.pem" --repo "${{github.repository}}" || true
           # delete the asset if exists
-          gh release delete-asset "stable" "cacert.pem" --yes --repo "${{github.repository}}" || true
-          gh release delete-asset "stable" "cacert.pem.sha256" --yes --repo "${{github.repository}}" || true
-          gh release upload "stable" "./cacert.pem" --repo "${{github.repository}}"
-          gh release upload "stable" "./cacert.pem.sha256" --repo "${{github.repository}}"
+          gh release upload "stable" "./cacert.pem" --repo "${{github.repository}}" --clobber
+          gh release upload "stable" "./cacert.pem.sha256" --repo "${{github.repository}}" --clobber
 
   metadata:
     runs-on: ubuntu-latest
@@ -110,3 +108,24 @@ jobs:
           folder: ./public
           single-commit: true
           commit-message: ${{ github.event.head_commit.message }}
+
+  # https://github.com/liskin/gh-workflow-keepalive
+  keepalive:
+    if: github.event_name == 'schedule'
+    name: Keepalive
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Re-enable workflow
+        run: |
+          case "${GITHUB_WORKFLOW_REF:?}" in
+          "${GITHUB_REPOSITORY:?}"/.github/workflows/*.y*ml@*) ;;
+          *) false ;;
+          esac
+          workflow="${GITHUB_WORKFLOW_REF%%@*}"
+          workflow="${workflow#${GITHUB_REPOSITORY}/.github/workflows/}"
+          echo "Re-enable $workflow"
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/enable"
